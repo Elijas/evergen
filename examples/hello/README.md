@@ -5,7 +5,8 @@ The smallest possible evergen setup: one generator, one output.
 From this directory:
 
 ```sh
-uv tool run --from ../.. evergen --output '{}.py' '{}.eg.py'
+uvx evergen --output '{}.py' '{}.eg.py'
+# or, against this checkout: uv tool run --from ../.. evergen --output '{}.py' '{}.eg.py'
 ```
 
 Expected output:

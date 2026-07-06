@@ -15,7 +15,8 @@ models.py              the signed output (committed)
 From this directory (`--with jinja2` supplies the generator's dependency):
 
 ```sh
-uv tool run --from ../.. --with jinja2 evergen --output '{}.py' '{}.eg.py'
+uvx --with jinja2 evergen --output '{}.py' '{}.eg.py'
+# or, against this checkout: uv tool run --from ../.. --with jinja2 evergen --output '{}.py' '{}.eg.py'
 ```
 
 Expected output:
