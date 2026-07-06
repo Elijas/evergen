@@ -1,0 +1,22 @@
+[project]
+name = "evergen"
+version = "0.1.0"
+description = "A tiny, generic Python codegen orchestrator."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Elijas" }]
+dependencies = []
+
+[project.scripts]
+evergen = "evergen.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
