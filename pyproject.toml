@@ -5,8 +5,26 @@ description = "A tiny, generic Python codegen orchestrator."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Elijas" }]
+keywords = ["codegen", "code-generation", "generator", "scaffolding", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Elijas/evergen"
+Changelog = "https://github.com/Elijas/evergen/blob/main/CHANGELOG.md"
 
 [project.scripts]
 evergen = "evergen.cli:main"
