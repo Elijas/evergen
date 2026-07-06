@@ -6,6 +6,9 @@ write safety. ``pytest -q --collect-only`` reads as the coverage checklist.
 
 from __future__ import annotations
 
+import os
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -323,7 +326,9 @@ def test_write_is_atomic_original_survives_failed_replace(
 ) -> None:
     # A crash during the write must not corrupt an existing valid output. With an
     # atomic temp-file + os.replace strategy, a failure at replace leaves the
-    # original bytes intact and no stray temp file behind.
+    # original bytes intact and no stray temp file behind. The write failure is
+    # reported as a one-line ERROR for that target and exits nonzero rather than
+    # escaping as a traceback (correctness F9).
     from evergen import cli
 
     monkeypatch.chdir(tmp_path)
@@ -341,10 +346,445 @@ def test_write_is_atomic_original_survives_failed_replace(
         raise OSError("simulated crash during rename")
 
     monkeypatch.setattr(cli.os, "replace", boom)
-    with pytest.raises(OSError):
-        main(["--output", "{}.py", "{}.eg.py"])
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "ERROR atom.py <- atom.eg.py: simulated crash during rename" in err
 
     # Original output is untouched, and no sibling temp file leaked.
     assert output.read_bytes() == original
     leaked = [p.name for p in tmp_path.iterdir() if p.name.startswith("atom.py.")]
     assert leaked == [], f"temp file leaked: {leaked}"
+
+
+def test_write_os_error_reports_error_and_continues_with_remaining_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A filesystem error while writing one target is a one-line ERROR for that
+    # target; the remaining targets still process, and the run exits nonzero
+    # without a traceback (correctness F9).
+    from evergen import cli
+
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "a.eg.py", 'A = 1\n')
+    write_gen(tmp_path / "b.eg.py", 'B = 1\n')
+
+    real_replace = cli.os.replace
+    calls = {"n": 0}
+
+    def flaky(src: str, dst: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:  # first target (sorted: a before b) fails to replace.
+            raise OSError("simulated write failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cli.os, "replace", flaky)
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "ERROR a.py <- a.eg.py: simulated write failure" in err
+    assert "Traceback" not in err
+    assert "WROTE b.py <- b.eg.py" in out
+    assert (tmp_path / "b.py").exists()
+    assert not (tmp_path / "a.py").exists()
+
+
+def test_write_preserves_existing_file_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Rewriting a clean output keeps the target's existing mode (e.g. an
+    # executable generated script), instead of resetting it to mkstemp's private
+    # 0600 (correctness F5).
+    if sys.platform == "win32":  # pragma: no cover - POSIX permission semantics.
+        pytest.skip("POSIX permission bits")
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "script.eg.py", 'print(1)\n')
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    output = tmp_path / "script.py"
+    os.chmod(output, 0o755)
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    assert "WROTE script.py <- script.eg.py" in out
+    assert stat.S_IMODE(output.stat().st_mode) == 0o755
+
+
+def test_new_file_gets_umask_permissions_not_private_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A brand new output is created like a normal open() would (0666 & ~umask),
+    # not with mkstemp's private 0600 (correctness F5).
+    if sys.platform == "win32":  # pragma: no cover - POSIX permission semantics.
+        pytest.skip("POSIX permission bits")
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "fresh.eg.py", 'VALUE = 1\n')
+
+    umask = os.umask(0)
+    os.umask(umask)
+    expected = 0o666 & ~umask
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    mode = stat.S_IMODE((tmp_path / "fresh.py").stat().st_mode)
+    assert mode == expected, oct(mode)
+    assert mode != 0o600
+
+
+# --- generator loading: sys.modules, encodings, sibling imports ----------------
+
+
+def test_generator_using_dataclass_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The generator module is registered in sys.modules while it executes, so
+    # ordinary Python that inspects sys.modules[cls.__module__] — @dataclass does
+    # — works instead of crashing (correctness F7).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "dc.eg.py").write_text(
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass\n"
+        "class Row:\n"
+        "    name: str\n"
+        "\n"
+        "def gen():\n"
+        '    return Row("ok").name + "\\n"\n',
+        encoding="utf-8",
+    )
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 0, err
+    assert "WROTE dc.py <- dc.eg.py" in out
+    assert "ok" in (tmp_path / "dc.py").read_text(encoding="utf-8")
+    # The temporary module name must not leak into sys.modules afterwards.
+    assert not any(name.startswith("_evergen_") for name in sys.modules)
+
+
+def test_generator_module_name_restored_after_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # sys.path and sys.modules are restored after loading a generator.
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "clean.eg.py", 'X = 1\n')
+    before_path = list(sys.path)
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 0, err
+    assert list(sys.path) == before_path
+
+
+def test_generator_source_honors_encoding_cookie_and_bom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Source is compiled from bytes so Python's own decoding handles a PEP 263
+    # coding cookie and a UTF-8 BOM instead of crashing on a strict utf-8 read
+    # (correctness F8).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "latin.eg.py").write_bytes(
+        b'# -*- coding: latin-1 -*-\n\ndef gen():\n    return "caf\xe9\\n"\n'
+    )
+    (tmp_path / "bom.eg.py").write_bytes(
+        b"\xef\xbb\xbfdef gen():\n    return \"ok\\n\"\n"
+    )
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 0, err
+    assert "café" in (tmp_path / "latin.py").read_text(encoding="utf-8")
+    assert "ok" in (tmp_path / "bom.py").read_text(encoding="utf-8")
+
+
+def test_generator_can_import_sibling_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A nested generator can import a sibling module by ordinary absolute import,
+    # because the generator's directory is placed on sys.path while it runs
+    # (correctness F3).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "helper.py").write_text('VALUE = "ok"\n', encoding="utf-8")
+    (tmp_path / "pkg" / "item.eg.py").write_text(
+        'from helper import VALUE\n\ndef gen():\n    return VALUE + "\\n"\n',
+        encoding="utf-8",
+    )
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "pkg/{}.eg.py")
+
+    assert code == 0, err
+    assert "WROTE item.py <- pkg/item.eg.py" in out
+    assert "ok" in (tmp_path / "item.py").read_text(encoding="utf-8")
+
+
+def test_generator_import_time_error_is_reported_not_tracebacked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An exception raised while executing the generator body (import time) is a
+    # one-line ERROR, not a traceback (correctness F3).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bad.eg.py").write_text(
+        "from nonexistent_sibling import thing\n\ndef gen():\n    return thing\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "failed to import" in err
+    assert "Traceback" not in err
+    assert not (tmp_path / "bad.py").exists()
+
+
+# --- glob character classes ----------------------------------------------------
+
+
+def test_glob_character_range_matches_are_all_processed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A glob character range like [a-z] must process every file glob matched,
+    # not silently drop the ones a too-narrow capture regex missed
+    # (correctness F2).
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "aone.eg.py", 'A = 1\n')
+    write_gen(tmp_path / "btwo.eg.py", 'B = 1\n')
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "[a-z]{}.eg.py")
+
+    assert code == 0, err
+    assert "WROTE one.py <- aone.eg.py" in out
+    assert "WROTE two.py <- btwo.eg.py" in out
+    assert (tmp_path / "one.py").exists()
+    assert (tmp_path / "two.py").exists()
+
+
+# --- classify before executing the generator (state precedence) ----------------
+
+
+def test_dirty_target_refused_without_running_generator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A dirty target is refused (without --overwrite) from its on-disk state
+    # alone; the generator — which here would fail — never runs
+    # (correctness F6 / security F7).
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "x.eg.py", 'X = 1\n')
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    output = tmp_path / "x.py"
+    output.write_text(output.read_text(encoding="utf-8") + "# hand edit\n", "utf-8")
+
+    # Replace the generator with one that fails at import time and marks that it
+    # ran. Classification must refuse before any of that happens.
+    (tmp_path / "x.eg.py").write_text(
+        "from pathlib import Path\n"
+        'Path("gen_ran.txt").write_text("ran", encoding="utf-8")\n'
+        "\n"
+        "def gen():\n"
+        '    raise RuntimeError("boom")\n',
+        encoding="utf-8",
+    )
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "REFUSE x.py <- x.eg.py: hand-edited" in out
+    assert "Traceback" not in err
+    assert "gen() failed" not in (out + err)
+    assert not (tmp_path / "gen_ran.txt").exists()
+
+
+def test_refused_target_does_not_block_other_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # One refused target still lets the others process; every target is reported
+    # and the run exits nonzero (correctness F6).
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "a.eg.py", 'A = 1\n')
+    write_gen(tmp_path / "b.eg.py", 'B = 1\n')
+    (tmp_path / "a.py").write_text("hand written\n", encoding="utf-8")  # unmanaged.
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "REFUSE a.py <- a.eg.py: not generated by evergen" in out
+    assert "WROTE b.py <- b.eg.py" in out
+    assert (tmp_path / "b.py").exists()
+
+
+def test_check_reports_dirty_without_running_generator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # In --check, DIRTY is decided from the file's on-disk state without running
+    # the generator (correctness F6).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "dirty.py").write_text(
+        "# SignedHash<<deadbeefdeadbeef>>\nbody = 1\n", encoding="utf-8"
+    )
+    (tmp_path / "dirty.eg.py").write_text(
+        "from pathlib import Path\n"
+        'Path("gen_ran.txt").write_text("ran", encoding="utf-8")\n'
+        "\n"
+        "def gen():\n"
+        '    raise RuntimeError("boom")\n',
+        encoding="utf-8",
+    )
+
+    code, out, err = run_evergen(capsys, "--check", "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "DIRTY dirty.py <- dirty.eg.py" in out
+    assert "Traceback" not in err
+    assert not (tmp_path / "gen_ran.txt").exists()
+
+
+def test_write_rechecks_state_before_atomic_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # TOCTOU narrowing: if a clean target turns dirty between classification and
+    # the write, the re-read immediately before the atomic write refuses it
+    # instead of clobbering the new edit (security F7).
+    from evergen import cli
+
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "x.eg.py", 'X = 1\n')
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    output = tmp_path / "x.py"
+    clean_bytes = output.read_bytes()
+
+    real_state = cli.read_existing_state
+    calls = {"n": 0}
+
+    def flaky(path: Path):  # first call classifies clean; the re-read is dirty.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_state(path)
+        return cli.ExistingState("dirty", body="tampered\n", stored_hash="0" * 16)
+
+    monkeypatch.setattr(cli, "read_existing_state", flaky)
+    code, out, _ = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+
+    assert code == 1
+    assert "REFUSE x.py <- x.eg.py: hand-edited" in out
+    assert output.read_bytes() == clean_bytes
+
+
+# --- non-UTF-8 existing targets ------------------------------------------------
+
+
+def test_non_utf8_existing_target_is_unmanaged_and_overwritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An existing output that is not valid UTF-8 has no readable SignedHash
+    # token, so it classifies as unmanaged: refused without --overwrite (no
+    # traceback), replaced with it (correctness F1).
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "x.eg.py", 'X = 1\n')
+    (tmp_path / "x.py").write_bytes(b"\xff\xfe\x00\x01")
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 1
+    assert "REFUSE x.py <- x.eg.py: not generated by evergen" in out
+    assert "Traceback" not in err
+
+    code, out, err = run_evergen(
+        capsys, "--overwrite", "--output", "{}.py", "{}.eg.py"
+    )
+    assert code == 0, err
+    assert "OVERWROTE x.py <- x.eg.py" in out
+    assert "X = 1" in (tmp_path / "x.py").read_text(encoding="utf-8")
+
+
+# --- header validation ---------------------------------------------------------
+
+
+def test_invalid_header_rejected_before_running_any_generator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A --header template missing the recognizable token is rejected up front,
+    # before any generator is discovered or executed (correctness F4).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "x.eg.py").write_text(
+        "from pathlib import Path\n"
+        'Path("gen_ran.txt").write_text("ran", encoding="utf-8")\n'
+        "\n"
+        "def gen():\n"
+        '    return "ok\\n"\n',
+        encoding="utf-8",
+    )
+
+    code, out, err = run_evergen(
+        capsys, "--header", "hash={hash}", "--output", "{}.py", "{}.eg.py"
+    )
+
+    assert code == 1
+    assert "SignedHash<<{hash}>>" in err
+    assert not (tmp_path / "gen_ran.txt").exists()
+    assert not (tmp_path / "x.py").exists()
+
+
+def test_header_format_lookup_errors_are_rewrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # str.format attribute/index lookups can raise AttributeError/IndexError/
+    # TypeError; those become a one-line ERROR, not a traceback (security F6).
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "x.eg.py", 'X = 1\n')
+
+    code, out, err = run_evergen(
+        capsys,
+        "--header",
+        "SignedHash<<{hash}>> {source.nope}",
+        "--output",
+        "{}.py",
+        "{}.eg.py",
+    )
+
+    assert code == 1
+    assert "invalid --header TEMPLATE" in err
+    assert "Traceback" not in err
+
+
+# --- path blast radius ---------------------------------------------------------
+
+
+def test_dotdot_capture_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A capture that resolves to ".." would retarget the write outside the
+    # apparent output tree; reject it before substitution (security F2).
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "...x.eg.py", 'X = 1\n')
+
+    code, out, err = run_evergen(
+        capsys, "--output", "out/{}/generated.py", ".{}x.eg.py"
+    )
+
+    assert code == 1
+    assert "'..'" in err
+    assert not (tmp_path / "generated.py").exists()
+
+
+def test_output_equals_source_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A mapping whose output resolves onto its own generator is refused up front,
+    # so --overwrite --output '{}.py' '{}.py' cannot destroy the generator
+    # (security F5).
+    monkeypatch.chdir(tmp_path)
+    tool = tmp_path / "tool.py"
+    tool.write_text("def gen():\n    return \"print(1)\\n\"\n", encoding="utf-8")
+    original = tool.read_bytes()
+
+    code, out, err = run_evergen(
+        capsys, "--overwrite", "--output", "{}.py", "{}.py"
+    )
+
+    assert code == 1
+    assert "same file as its generator" in err
+    assert tool.read_bytes() == original
