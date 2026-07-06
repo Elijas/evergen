@@ -183,4 +183,5 @@ repos:
 
 ## Name
 
-PyPI name status: pending check.
+PyPI name status: `https://pypi.org/pypi/evergen/json` returned 404 on
+2026-07-06, so the name appeared available at check time.
