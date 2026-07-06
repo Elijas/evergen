@@ -1,6 +1,6 @@
 [project]
 name = "evergen"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tiny, generic Python codegen orchestrator."
 readme = "README.md"
 requires-python = ">=3.10"

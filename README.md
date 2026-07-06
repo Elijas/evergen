@@ -175,7 +175,7 @@ repos:
     hooks:
       - id: evergen-check
         name: evergen check
-        entry: uvx evergen@0.1.0 --check --output '{}.py' '{}.eg.py'
+        entry: uvx evergen@0.2.0 --check --output '{}.py' '{}.eg.py'
         language: system
         pass_filenames: false
 ```
