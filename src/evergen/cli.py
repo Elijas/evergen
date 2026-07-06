@@ -203,8 +203,10 @@ def validate_capture(capture: str, source: Path) -> None:
     # The capture already cannot contain a path separator (see the {} group in
     # glob_capture_regex), but "." and ".." are still single segments that,
     # once substituted into the output pattern and normalized, silently retarget
-    # the write at the source's directory or its parent. Reject them outright.
-    if capture in {".", ".."}:
+    # the write at the source's directory or its parent — and a plain input like
+    # ".eg.py" strips down to an empty capture, which is no path segment at all.
+    # Reject all three outright.
+    if capture in {"", ".", ".."}:
         raise EvergenError(
             f"{display_path(source)}: capture {capture!r} is not a valid path segment"
         )
@@ -434,13 +436,17 @@ def load_generator(path: Path) -> str:
     #   * the generator's own directory is on sys.path, so a nested generator
     #     can ``from sibling import ...`` — matching the setup.py trust model.
     # Both are restored in the finally block. A unique per-path module name keeps
-    # distinct generators from clobbering one another.
-    # KNOWN UNKNOWN: only the generator's own sys.modules entry is restored -
-    # sibling modules a generator imports (e.g. `helper`) stay cached, so two
-    # generators in different dirs importing a same-named sibling would share the
-    # first one. Matches ordinary Python import caching; left as-is per spec.
+    # distinct generators from clobbering one another. Sibling modules the
+    # generator imported are evicted from sys.modules afterwards too: without
+    # that, two generators in different directories importing a same-named
+    # sibling would silently share whichever loaded first, making output depend
+    # on co-invocation and violating the determinism law. Stdlib and installed
+    # packages keep their normal import caching — only modules whose files live
+    # under the generator's own directory are evicted.
     saved_module = sys.modules.get(module_name)
+    saved_keys = set(sys.modules)
     saved_path = sys.path[:]
+    generator_dir = path.parent.resolve()
     sys.modules[module_name] = module
     sys.path.insert(0, str(path.parent))
     try:
@@ -466,6 +472,14 @@ def load_generator(path: Path) -> str:
             sys.modules[module_name] = saved_module
         else:
             sys.modules.pop(module_name, None)
+        for name in list(sys.modules):
+            if name in saved_keys or name == module_name:
+                continue
+            module_file = getattr(sys.modules[name], "__file__", None)
+            if module_file is None:
+                continue  # builtins/namespace packages have no file; keep cached.
+            if Path(module_file).resolve().is_relative_to(generator_dir):
+                del sys.modules[name]
 
 
 def execute_source_without_bytecode_cache(module: ModuleType, path: Path) -> None:

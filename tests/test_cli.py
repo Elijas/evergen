@@ -891,6 +891,30 @@ def test_generator_can_import_sibling_module(
     assert "ok" in (tmp_path / "item.py").read_text(encoding="utf-8")
 
 
+def test_same_named_siblings_do_not_leak_between_generators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Sibling modules are evicted from sys.modules after each generator runs.
+    # Without eviction, two generators in different directories importing a
+    # same-named sibling would share whichever loaded first, so output would
+    # depend on co-invocation and break the determinism law.
+    monkeypatch.chdir(tmp_path)
+    for dirname, value in (("dira", "A"), ("dirb", "B")):
+        subdir = tmp_path / dirname
+        subdir.mkdir()
+        (subdir / "helper.py").write_text(f'VALUE = "{value}"\n', encoding="utf-8")
+        (subdir / "item.eg.py").write_text(
+            'from helper import VALUE\n\ndef gen():\n    return VALUE + "\\n"\n',
+            encoding="utf-8",
+        )
+
+    code, out, err = run_evergen(capsys, "--output", "{}_out.py", "**/{}.eg.py")
+
+    assert code == 0, err
+    assert "A" in (tmp_path / "dira" / "item_out.py").read_text(encoding="utf-8")
+    assert "B" in (tmp_path / "dirb" / "item_out.py").read_text(encoding="utf-8")
+
+
 def test_generator_import_time_error_is_reported_not_tracebacked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1204,6 +1228,21 @@ def test_dotdot_capture_is_rejected(
     assert code == 1
     assert "'..'" in err
     assert not (tmp_path / "generated.py").exists()
+
+
+def test_empty_capture_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A plain input like ".eg.py" strips down to an empty capture, which would
+    # write a file literally named ".py"; reject it like "." and "..".
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / ".eg.py", "X = 1\n")
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", ".eg.py")
+
+    assert code == 1
+    assert "''" in err
+    assert not (tmp_path / ".py").exists()
 
 
 def test_output_equals_source_is_rejected(

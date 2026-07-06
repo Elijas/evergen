@@ -264,7 +264,9 @@ work. While a generator executes, its own directory is prepended to `sys.path`
 (so sibling modules import normally) and its module object is registered in
 `sys.modules` (so decorators and libraries that inspect
 `sys.modules[cls.__module__]`, such as `dataclasses`, behave). Both are undone
-after the generator runs.
+after the generator runs, and sibling modules it imported are evicted from
+`sys.modules` too — each generator re-imports its siblings fresh, so two
+generators with same-named siblings never share state.
 
 Output path resolution:
 
