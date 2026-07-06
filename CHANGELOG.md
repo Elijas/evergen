@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the header token is now `BodyHash<<algorithm:hash>>` (e.g.
+  `BodyHash<<sha256:4660ab1ff310887b>>`), replacing `SignedHash<<hash>>`. The
+  old name implied a cryptographic signature the mechanism never had, and the
+  token now names its hash algorithm, so the algorithm can evolve without
+  another format break: evergen writes SHA-256 and verifies with whatever
+  `hashlib` algorithm the token names. Outputs written by 0.1.0 read as
+  unmanaged — rerun evergen once with `--overwrite` to migrate them.
 - README restructured around adoption: problem statement, PyPI-first quick
   start, positioning vs alternatives, install/requirements section, badges,
   FAQ, and honest scoping of the safety promise (unauthenticated
