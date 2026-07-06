@@ -1,3 +1,9 @@
+"""End-to-end specification of the evergen CLI, grouped by concern:
+
+capture & mapping -> output-state machine -> header signing -> determinism ->
+write safety. ``pytest -q --collect-only`` reads as the coverage checklist.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,6 +28,9 @@ def run_evergen(capsys: pytest.CaptureFixture[str], *args: str) -> tuple[int, st
     return code, captured.out, captured.err
 
 
+# --- capture pattern & mapping ------------------------------------------------
+
+
 def test_capture_pattern_mapping_nonrecursive_and_recursive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -42,6 +51,60 @@ def test_capture_pattern_mapping_nonrecursive_and_recursive(
     assert code == 0, err
     assert "WROTE src/pkg/two__out.py <- src/pkg/two.eg.py" in out
     assert (tmp_path / "src" / "pkg" / "two__out.py").exists()
+
+
+def test_capture_does_not_cross_path_separators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A non-recursive `{}` must match a single path segment only. `a/{}.eg.py`
+    # must not capture `sub/x` for a nested `a/sub/x.eg.py`.
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "a" / "y.eg.py", 'print("y")\n')
+    write_gen(tmp_path / "a" / "sub" / "x.eg.py", 'print("x")\n')
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "a/{}.eg.py")
+
+    assert code == 0, err
+    assert "WROTE y.py <- a/y.eg.py" in out
+    assert (tmp_path / "y.py").exists()
+    # The nested file must not have been captured as `sub/x`.
+    assert "sub/x" not in out
+    assert not (tmp_path / "sub" / "x.py").exists()
+
+
+def test_dotted_generator_filename_is_loadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "summary.eg.py", 'print("summary")\n')
+
+    code, out, err = run_evergen(capsys, "--output", "{}.out.py", "{}.eg.py")
+
+    assert code == 0, err
+    assert "WROTE summary.out.py <- summary.eg.py" in out
+    assert 'print("summary")' in (tmp_path / "summary.out.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_duplicate_outputs_fail_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "a" / "same.eg.py", 'print("a")\n')
+    write_gen(tmp_path / "b" / "same.eg.py", 'print("b")\n')
+
+    code, out, err = run_evergen(
+        capsys, "--output", "{}.py", "a/{}.eg.py", "b/{}.eg.py"
+    )
+
+    assert code == 1
+    assert out == ""
+    assert "ERROR duplicate output same.py" in err
+    assert not (tmp_path / "same.py").exists()
+
+
+# --- output-state machine: missing / clean / unmanaged / dirty -----------------
 
 
 def test_default_write_states_missing_clean_unmanaged_and_dirty(
@@ -161,21 +224,7 @@ def test_overwrite_replaces_unmanaged_and_dirty(
     assert "OVERWROTE dirty.py <- dirty.eg.py" in out
 
 
-def test_duplicate_outputs_fail_before_any_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    write_gen(tmp_path / "a" / "same.eg.py", 'print("a")\n')
-    write_gen(tmp_path / "b" / "same.eg.py", 'print("b")\n')
-
-    code, out, err = run_evergen(
-        capsys, "--output", "{}.py", "a/{}.eg.py", "b/{}.eg.py"
-    )
-
-    assert code == 1
-    assert out == ""
-    assert "ERROR duplicate output same.py" in err
-    assert not (tmp_path / "same.py").exists()
+# --- signed header ------------------------------------------------------------
 
 
 def test_header_decoration_still_detects_generated_file(
@@ -198,73 +247,6 @@ def test_header_decoration_still_detects_generated_file(
     )
     assert code == 0, err
     assert "OK asset.js <- asset.eg.py" in out
-
-
-def test_crlf_checked_out_output_is_not_dirty_or_stale(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    write_gen(tmp_path / "line.eg.py", 'print("a")\nprint("b")\n')
-
-    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
-    assert code == 0, err
-    output = tmp_path / "line.py"
-    output.write_bytes(output.read_bytes().replace(b"\n", b"\r\n"))
-
-    code, out, err = run_evergen(capsys, "--check", "--output", "{}.py", "{}.eg.py")
-
-    assert code == 0, err
-    assert "OK line.py <- line.eg.py" in out
-
-
-def test_two_runs_are_byte_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    write_gen(tmp_path / "stable.eg.py", 'VALUE = 1\n')
-
-    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
-    assert code == 0, err
-    first = (tmp_path / "stable.py").read_bytes()
-
-    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
-    assert code == 0, err
-
-    assert (tmp_path / "stable.py").read_bytes() == first
-
-
-def test_dotted_generator_filename_is_loadable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    write_gen(tmp_path / "summary.eg.py", 'print("summary")\n')
-
-    code, out, err = run_evergen(capsys, "--output", "{}.out.py", "{}.eg.py")
-
-    assert code == 0, err
-    assert "WROTE summary.out.py <- summary.eg.py" in out
-    assert 'print("summary")' in (tmp_path / "summary.out.py").read_text(
-        encoding="utf-8"
-    )
-
-
-def test_capture_does_not_cross_path_separators(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # A non-recursive `{}` must match a single path segment only. `a/{}.eg.py`
-    # must not capture `sub/x` for a nested `a/sub/x.eg.py`.
-    monkeypatch.chdir(tmp_path)
-    write_gen(tmp_path / "a" / "y.eg.py", 'print("y")\n')
-    write_gen(tmp_path / "a" / "sub" / "x.eg.py", 'print("x")\n')
-
-    code, out, err = run_evergen(capsys, "--output", "{}.py", "a/{}.eg.py")
-
-    assert code == 0, err
-    assert "WROTE y.py <- a/y.eg.py" in out
-    assert (tmp_path / "y.py").exists()
-    # The nested file must not have been captured as `sub/x`.
-    assert "sub/x" not in out
-    assert not (tmp_path / "sub" / "x.py").exists()
 
 
 def test_body_containing_its_own_token_round_trips(
@@ -297,6 +279,45 @@ def test_body_containing_its_own_token_round_trips(
     assert "DIRTY evil.py <- evil.eg.py" in out
 
 
+# --- determinism ----------------------------------------------------------------
+
+
+def test_two_runs_are_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "stable.eg.py", 'VALUE = 1\n')
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    first = (tmp_path / "stable.py").read_bytes()
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+
+    assert (tmp_path / "stable.py").read_bytes() == first
+
+
+def test_crlf_checked_out_output_is_not_dirty_or_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "line.eg.py", 'print("a")\nprint("b")\n')
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    output = tmp_path / "line.py"
+    output.write_bytes(output.read_bytes().replace(b"\n", b"\r\n"))
+
+    code, out, err = run_evergen(capsys, "--check", "--output", "{}.py", "{}.eg.py")
+
+    assert code == 0, err
+    assert "OK line.py <- line.eg.py" in out
+
+
+# --- write safety ---------------------------------------------------------------
+
+
 def test_write_is_atomic_original_survives_failed_replace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -327,4 +348,3 @@ def test_write_is_atomic_original_survives_failed_replace(
     assert output.read_bytes() == original
     leaked = [p.name for p in tmp_path.iterdir() if p.name.startswith("atom.py.")]
     assert leaked == [], f"temp file leaked: {leaked}"
-
