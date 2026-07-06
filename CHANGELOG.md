@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the header token now states its truncation explicitly —
+  `BodyHash<<sha256.hex[:16]:…>>` instead of `BodyHash<<sha256:…>>`, which
+  implied the full digest while storing a 16-char prefix. The token reads as
+  the pseudocode it is (`hexdigest()[:16]`), and verification honors whatever
+  algorithm and slice the token declares. Outputs written by 0.2.0 read as
+  unmanaged — rerun evergen once with `--overwrite` to migrate.
+- README: the Jinja2 example now shows the generated `models.py` output.
+
 ## [0.2.0] - 2026-07-06
 
 ### Fixed
