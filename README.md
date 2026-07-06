@@ -9,10 +9,10 @@ regeneration is safe by mechanism instead of by discipline.
 
 ## Quick start
 
-evergen is not yet on PyPI. Run it straight from the repository with `uvx`:
+Run evergen with `uvx`:
 
 ```sh
-uvx --from git+https://github.com/Elijas/evergen evergen --help
+uvx evergen --help
 ```
 
 Or from a local clone: `uv tool run --from /path/to/evergen evergen …`. The
@@ -229,5 +229,4 @@ anchors to the current working directory.
 
 ## Name
 
-PyPI name status: `https://pypi.org/pypi/evergen/json` returned 404 on
-2026-07-06, so the name appeared available at check time.
+PyPI project: <https://pypi.org/project/evergen/>

@@ -7,20 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- GitHub Actions release workflow that builds and publishes tagged releases to
-  PyPI via Trusted Publishing.
-
-### Changed
-
-- Updated GitHub Actions dependencies to current Node.js 24-compatible major
-  versions.
-
 ## [0.1.0] - 2026-07-06
 
 ### Added
 
+- GitHub Actions release workflow that builds and publishes tagged releases to
+  PyPI via Trusted Publishing.
 - `evergen` CLI: maps generator files to output files via `{}` glob patterns
   and executes each generator's `gen() -> str`.
 - Signed headers with three-state detection: clean (regenerate), stale
@@ -31,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Atomic output writes (temp file + `os.replace`), so interrupted runs never
   leave truncated files.
 - Zero runtime dependencies; supports Python 3.10–3.13.
+
+### Changed
+
+- Updated GitHub Actions dependencies to current Node.js 24-compatible major
+  versions.
 
 [Unreleased]: https://github.com/Elijas/evergen/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Elijas/evergen/releases/tag/v0.1.0
