@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import sys
+import tempfile
 from types import ModuleType
 from typing import Iterable, Sequence
 
@@ -326,8 +327,10 @@ def load_generator(path: Path) -> str:
 
 
 def execute_source_without_bytecode_cache(module: ModuleType, path: Path) -> None:
-    # Keep spec-from-file module metadata while avoiding stale pyc reads between
-    # rapid generator edits.
+    # Read and compile the generator source directly rather than via
+    # SourceFileLoader.exec_module: that loader writes __pycache__ beside every
+    # generator and can serve a stale .pyc for a same-size edit within one mtime
+    # tick, which would silently generate from old source and break determinism.
     source = path.read_text(encoding="utf-8")
     code = compile(source, str(path), "exec")
     exec(code, module.__dict__)
@@ -408,11 +411,30 @@ def run_write(planned: Iterable[PlannedFile], *, overwrite: bool) -> int:
             failed = True
             continue
 
-        item.mapping.output.parent.mkdir(parents=True, exist_ok=True)
-        item.mapping.output.write_text(item.content, encoding="utf-8")
+        atomic_write_text(item.mapping.output, item.content)
         status = "OVERWROTE" if state.kind in {"unmanaged", "dirty"} else "WROTE"
         print(report_line(status, item.mapping, ""))
     return 1 if failed else 0
+
+
+def atomic_write_text(output: Path, content: str) -> None:
+    # Write to a sibling temp file, then os.replace onto the target so a crash
+    # mid-write cannot truncate an existing valid output. The temp lives in the
+    # target's directory to keep the rename on one filesystem (atomic).
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=output.parent, prefix=output.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+        os.replace(tmp_name, output)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def report_line(status: str, mapping: Mapping, message: str) -> str:

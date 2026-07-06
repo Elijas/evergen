@@ -85,6 +85,9 @@ Without `--overwrite`:
 
 With `--overwrite`, evergen replaces unmanaged and dirty targets.
 
+Writes are atomic: each output is written to a sibling temporary file and then
+renamed into place, so a crash mid-write cannot truncate an existing output.
+
 ### Check Mode
 
 `--check` writes nothing. It exits nonzero if any target is:
