@@ -247,3 +247,84 @@ def test_dotted_generator_filename_is_loadable(
         encoding="utf-8"
     )
 
+
+def test_capture_does_not_cross_path_separators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A non-recursive `{}` must match a single path segment only. `a/{}.eg.py`
+    # must not capture `sub/x` for a nested `a/sub/x.eg.py`.
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "a" / "y.eg.py", 'print("y")\n')
+    write_gen(tmp_path / "a" / "sub" / "x.eg.py", 'print("x")\n')
+
+    code, out, err = run_evergen(capsys, "--output", "{}.py", "a/{}.eg.py")
+
+    assert code == 0, err
+    assert "WROTE y.py <- a/y.eg.py" in out
+    assert (tmp_path / "y.py").exists()
+    # The nested file must not have been captured as `sub/x`.
+    assert "sub/x" not in out
+    assert not (tmp_path / "sub" / "x.py").exists()
+
+
+def test_body_containing_its_own_token_round_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # If gen() output itself contains a SignedHash<<...>> token on an early line,
+    # the real header is still line 1, so detection binds to it and a later
+    # hand-edit of the body must still read DIRTY.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "evil.eg.py").write_text(
+        "def gen():\n"
+        "    return '# SignedHash<<deadbeefdeadbeef>>\\nreal_code = 1\\n'\n",
+        encoding="utf-8",
+    )
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "evil.eg.py")
+    assert code == 0, err
+
+    code, out, err = run_evergen(capsys, "--check", "--output", "{}.py", "evil.eg.py")
+    assert code == 0, err
+    assert "OK evil.py <- evil.eg.py" in out
+
+    output = tmp_path / "evil.py"
+    output.write_text(
+        output.read_text(encoding="utf-8").replace("real_code = 1", "real_code = 999"),
+        encoding="utf-8",
+    )
+    code, out, _ = run_evergen(capsys, "--check", "--output", "{}.py", "evil.eg.py")
+    assert code == 1
+    assert "DIRTY evil.py <- evil.eg.py" in out
+
+
+def test_write_is_atomic_original_survives_failed_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A crash during the write must not corrupt an existing valid output. With an
+    # atomic temp-file + os.replace strategy, a failure at replace leaves the
+    # original bytes intact and no stray temp file behind.
+    from evergen import cli
+
+    monkeypatch.chdir(tmp_path)
+    write_gen(tmp_path / "atom.eg.py", 'VALUE = 1\n')
+
+    code, _, err = run_evergen(capsys, "--output", "{}.py", "{}.eg.py")
+    assert code == 0, err
+    output = tmp_path / "atom.py"
+    original = output.read_bytes()
+
+    # Regenerate with different content, but make the atomic swap fail.
+    write_gen(tmp_path / "atom.eg.py", 'VALUE = 2\n')
+
+    def boom(src: str, dst: str) -> None:
+        raise OSError("simulated crash during rename")
+
+    monkeypatch.setattr(cli.os, "replace", boom)
+    with pytest.raises(OSError):
+        main(["--output", "{}.py", "{}.eg.py"])
+
+    # Original output is untouched, and no sibling temp file leaked.
+    assert output.read_bytes() == original
+    leaked = [p.name for p in tmp_path.iterdir() if p.name.startswith("atom.py.")]
+    assert leaked == [], f"temp file leaked: {leaked}"
+
