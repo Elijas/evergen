@@ -108,7 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
         "inputs",
         nargs="+",
         metavar="INPUT_PATTERN",
-        help="Input glob pattern containing exactly one {} placeholder.",
+        help=(
+            "Input glob pattern containing exactly one {} placeholder, "
+            "or a plain .py generator file."
+        ),
     )
     return parser
 
