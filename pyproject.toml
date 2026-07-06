@@ -38,3 +38,8 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+
+[tool.ruff]
+# .j2.py templates are jinja-in-python-clothing (deliberate: py highlighting);
+# they are not valid Python and are rendered, never imported or linted.
+extend-exclude = ["*.j2.py"]
