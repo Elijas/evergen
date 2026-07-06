@@ -18,12 +18,15 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Code Generators",
 ]
 dependencies = []
 
 [project.urls]
+Homepage = "https://github.com/Elijas/evergen"
 Repository = "https://github.com/Elijas/evergen"
+Issues = "https://github.com/Elijas/evergen/issues"
 Changelog = "https://github.com/Elijas/evergen/blob/main/CHANGELOG.md"
 
 [project.scripts]
@@ -38,6 +41,20 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+# Explicit allowlist so untracked/scratch files in the worktree can never leak
+# into the sdist (hatchling's default sdist selection walks the directory tree
+# honoring .gitignore, not `git ls-files`, so untracked-but-not-ignored files
+# are otherwise included).
+include = [
+    "/src",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
 
 [tool.ruff]
 # .j2.py templates are jinja-in-python-clothing (deliberate: py highlighting);
